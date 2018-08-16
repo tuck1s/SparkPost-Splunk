@@ -2,20 +2,20 @@ package main
 
 // Based on https://github.com/aws-samples/lambda-go-samples
 import (
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"os"
 	"runtime"
 
+	"bytes"
+	"crypto/tls"
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
+	"net/http"
 )
 
-// Handler is your Lambda function handler
-// It uses Amazon API Gateway request/responses provided by the aws-lambda-go/events package,
-// However you could use other event sources (S3, Kinesis etc), or JSON-decoded primitive types such as 'string'.
+// Lambda function handler
 func Handler(req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
 
 	// stdout and stderr are sent to AWS CloudWatch Logs
@@ -23,35 +23,41 @@ func Handler(req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse,
 
 	switch req.HTTPMethod {
 	case "POST":
-		return rest_domains_post(req)
-	case "PUT":
-	case "GET":
-	case "DELETE":
-	}
-
-	return events.APIGatewayProxyResponse{
-		Body:       "error",
-		StatusCode: 404,
-	}, nil
-}
-
-// Handler to create a Sending Domain for a customer
-func rest_domains_post(session events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
-	if p := session.PathParameters; p == nil {
-		jsonb, _ := json.Marshal("OK")
-
-		// XXX: X-ENTITY-ID header
+		return rest_webhooks_post(req)
+	default:
 		return events.APIGatewayProxyResponse{
-			Body:       string(jsonb),
-			StatusCode: 200,
-		}, nil
-	} else {
-		// XXX: verify on /{domain}/verify
-		return events.APIGatewayProxyResponse{
-			Body:       "error",
+			Body:       "Unsupported method",
 			StatusCode: 404,
 		}, nil
 	}
+}
+
+// Handler for an incoming webhooks POST. Make outgoing request
+func rest_webhooks_post(session events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	const splunkUrl = "https://input-prd-p-52cm87k9p7sx.cloud.splunk.com:8088/services/collector"
+	//const splunkUrl = "https://bigger-bin.herokuapp.com/1o8fwbd1"
+
+	var buf = bytes.NewBufferString(session.Body)
+
+	// Splunk provides x509: certificate signed by unknown authority :-( , so we need to skip those checks (like curl -v)
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := &http.Client{Transport: tr}
+	req, _ := http.NewRequest("POST", splunkUrl, buf)
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Authorization", "Splunk xyz")
+	res, err := client.Do(req)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(res)
+	buf2 := new(bytes.Buffer)
+	buf2.ReadFrom(res.Body)
+	return events.APIGatewayProxyResponse{
+		Body:       buf2.String(),
+		StatusCode: res.StatusCode,
+	}, nil
 }
 
 func main() {
@@ -66,7 +72,8 @@ func main() {
 				fmt.Println(err)
 			}
 			var req events.APIGatewayProxyRequest
-			err = json.Unmarshal(b, &req)
+			req.Body = string(b)
+			req.HTTPMethod = "POST"
 
 			var res events.APIGatewayProxyResponse
 			res, _ = Handler(req)
